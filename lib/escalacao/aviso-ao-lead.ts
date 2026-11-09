@@ -76,6 +76,16 @@ export type MotivoDoAviso =
 /**
  * Traduz o `last_handoff_reason` gravado no banco para o motivo que muda a frase.
  * Aceita `string` porque a coluna é vocabulário ABERTO — ver `MotivoDoAviso`.
+ *
+ * ⚠️ **Só `requested_human` vira `pediu_humano`, e isso é a régua (#3310).** Todo
+ * o resto — a escalação que o PRÓPRIO agente decidiu (`low_confidence`,
+ * `critical_stage`, `caso_escalado`…), o teto de gasto, o sentimento, um motivo
+ * novo que ninguém mapeou — cai em `outro`, a frase genérica e honesta
+ * ("Esse caso é melhor resolvido por uma pessoa"). Inventar um pedido do cliente
+ * na abertura é o defeito que a issue mediu: quem só perguntou do check-in
+ * recebia "Sem problema. Acabei de acionar uma pessoa do time", resposta a um
+ * pedido que ele não fez. Por isso o mapeamento NÃO adivinha: ele depende de o
+ * código do pedido chegar de fato até aqui (ver `motivoCodigoDoTexto`).
  */
 export function motivoDoAviso(reason: string): MotivoDoAviso {
   if (reason === "requested_human") return "pediu_humano";
@@ -119,7 +129,7 @@ const ABERTURAS: Record<MotivoDoAviso, readonly string[]> = {
   ],
   pediu_humano: [
     "Claro! Já estou chamando alguém da equipe para falar com você.",
-    "Sem problema — acabei de acionar uma pessoa do time para continuar daqui.",
+    "Sem problema. Acabei de acionar uma pessoa do time para continuar daqui.",
     "Perfeito. Passei sua conversa para um atendente humano agora.",
   ],
   orcamento_de_ia: [
@@ -146,7 +156,7 @@ const FECHOS = {
   fora_de_expediente: [
     "No momento ninguém está disponível, mas seu pedido ficou registrado.",
     "Agora não tem ninguém livre; deixei sua solicitação anotada para o time.",
-    "Não há atendente disponível neste instante — sua conversa entrou na fila.",
+    "Não há atendente disponível neste instante; sua conversa entrou na fila.",
   ],
   /** Há gente elegível: pode convidar a aguardar. */
   com_equipe: [

@@ -22,6 +22,7 @@ import { traduzir } from "@/lib/i18n/dicionario";
 import type { Idioma } from "@/lib/i18n/idiomas";
 
 import { ReprocessarConversao } from "./_reprocessar";
+import { LinkDoNegocio } from "./_linkDoNegocio";
 
 const ROTULO_DO_PERIODO: Record<(typeof PERIODOS)[number], string> = {
   hoje: "Hoje",
@@ -63,7 +64,8 @@ export function HistoricoDeEnvios({
   linhas: LinhaDoHistorico[];
   total: number;
   filtros: FiltrosDoHistorico;
-  regras: RegraDeConversaoGoogle[];
+  /** O nome de cada evento de etapa (Google e Meta), para o filtro e a tabela. */
+  regras: Pick<RegraDeConversaoGoogle, "eventName" | "label">[];
   idioma: Idioma;
 }) {
   const t = (texto: string) => traduzir(texto, idioma);
@@ -231,12 +233,9 @@ export function HistoricoDeEnvios({
                       )}
                     </dl>
                     <div className="flex flex-wrap gap-2">
-                      <a
-                        className="underline underline-offset-2"
-                        href={`/app/kanban?lead=${l.leadId}`}
-                      >
+                      <LinkDoNegocio className="underline underline-offset-2" leadId={l.leadId}>
                         {t("Abrir negócio")}
-                      </a>
+                      </LinkDoNegocio>
                       {situacao !== "entregue" && (
                         <ReprocessarConversao leadId={l.leadId} idioma={idioma} evento={l.evento} />
                       )}

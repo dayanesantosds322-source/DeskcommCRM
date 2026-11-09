@@ -34,6 +34,11 @@ export interface StageRow {
   agent_stage_hint: string | null;
   pipeline_id: string;
   organization_id: string;
+  /**
+   * Janela de "esfriando" em horas (issue #1532). `null` = etapa anterior à
+   * configuração, o estado que o radar trata como padrão de 24 h.
+   */
+  expected_duration_hours: number | null;
 }
 
 export function etapa(over: Partial<StageRow> & { id: string; name: string }): StageRow {
@@ -46,6 +51,7 @@ export function etapa(over: Partial<StageRow> & { id: string; name: string }): S
     agent_stage_hint: null,
     pipeline_id: PIPE,
     organization_id: ORG_ID,
+    expected_duration_hours: null,
     ...over,
   };
 }
@@ -56,6 +62,32 @@ export interface LeadRow {
   pipeline_id: string;
   organization_id: string;
   contact_id: string | null;
+  /**
+   * #2032 — a rota `win-rates` lê estes DOIS para medir a etapa ATUAL:
+   * `stage_changed_at` é o carimbo da 0071 e `created_at` é a reserva dele.
+   * Opcional aqui porque a maioria dos testes não mede tempo de etapa.
+   */
+  stage_changed_at?: string | null;
+  created_at?: string;
+  /**
+   * #2995 — as três colunas do RECORTE DE ENCERRADOS ANTIGOS do quadro, que a
+   * rota do board lê de uma vez com o `select("*")`: `status` e `closed_at`
+   * decidem o recorte e `position_in_stage` é a ordem da leitura. Opcionais
+   * porque a maioria dos testes não fala de negócio encerrado — e declaradas
+   * aqui, e não num `as` no arquivo de teste, para o caso que monta um ganho
+   * velho continuar medindo o handler em vez do dublê.
+   */
+  status?: "open" | "won" | "lost" | "archived";
+  closed_at?: string | null;
+  position_in_stage?: number;
+  /**
+   * #2995 — as duas colunas de ATIVIDADE, que o recorte NÃO pode usar: o corte é
+   * por data de encerramento. O caso do ganho de dois dias com atividade de
+   * meses atrás só mede o corte certo se as duas existirem para serem
+   * ignoradas — por isso moram aqui, e não num `as` no teste.
+   */
+  last_activity_at?: string | null;
+  updated_at?: string | null;
 }
 
 export function negocio(id: string, stageId: string, over: Partial<LeadRow> = {}): LeadRow {
@@ -78,6 +110,12 @@ export interface PipelineRow {
   description: string | null;
   position: number;
   is_default: boolean;
+  /**
+   * Marca de funil de clientes (migration 0262). Opcional: sem ela a linha é
+   * "não marcado", que é o estado de fábrica — e é o que a #2559 usa para provar
+   * que ARQUIVAR o funil marcado é recusado.
+   */
+  is_client_pipeline?: boolean;
   is_archived: boolean;
   organization_id: string;
 }
@@ -121,6 +159,19 @@ export interface DbOpts {
   contacts?: Array<Record<string, unknown>>;
   /** Erro do banco na n-ésima escrita (1-based), como o PostgREST devolveria. */
   writeError?: (n: number, table: string) => { code: string; message: string } | null;
+  /** Erro do banco numa LEITURA, decidido pela tabela e pelos filtros `eq` dela. */
+  readError?: (table: string, filtros: Array<[string, unknown]>) => { code: string; message: string } | null;
+  /**
+   * O `max_rows` do PostgREST (1000 em `supabase/config.toml`): corta TODA
+   * leitura nesse tamanho, sem erro, por maior que seja o `.limit`/`.range`.
+   * Ausente = sem corte, que é o que os testes que não falam de volume querem.
+   */
+  maxRows?: number;
+  /**
+   * A sessão do cookie (#2995). Ausente = a sessão de sempre (`USER_ID`);
+   * `null` = sem sessão, que é o 401 do quadro.
+   */
+  user?: { id: string } | null;
 }
 
 type Linha = Record<string, unknown>;
@@ -135,7 +186,16 @@ export interface Registro {
    * dublê — e dois dublês da mesma tabela divergem no primeiro ajuste, que é
    * exatamente o defeito que a extração da regra existe para evitar.
    */
-  client: { from: (table: string) => unknown; rpc: (nome: string, args: unknown) => Promise<unknown> };
+  client: {
+    from: (table: string) => unknown;
+    rpc: (nome: string, args: unknown) => Promise<unknown>;
+    /**
+     * Sessão do cookie (#2995): a rota do QUADRO confere `supabase.auth.getUser()`
+     * antes de ler qualquer coisa. Sem este ramo, o teste do quadro morreria num
+     * TypeError do dublê (`auth` não existe) e mediria o dublê, não o handler.
+     */
+    auth: { getUser: () => Promise<{ data: { user: { id: string } | null }; error: null }> };
+  };
   escritas: Escrita[];
   eventos: string[];
   rpcs: Array<{ nome: string; args: unknown }>;
@@ -216,21 +276,41 @@ export function makeDb(opts: DbOpts = {}): Registro {
 
   function builder(table: string) {
     const filtros: Array<[string, unknown]> = [];
+    /**
+     * `.gte(col, valor)` / `.lte(col, valor)` — recorte por DATA, o que a taxa
+     * histórica por etapa (#1753) usa para dizer de QUAL período é o número.
+     * Sem estes dois, a rota cairia num TypeError do dublê e o teste mediria o
+     * dublê em vez do handler. A comparação é de string: o `performed_at` do
+     * Postgres é ISO-8601 em UTC, e ISO ordena lexicograficamente.
+     */
+    const intervalos: Array<{ coluna: string; op: "gte" | "lte"; valor: string }> = [];
     const pertinencias: Array<[string, unknown[]]> = [];
     const negacoes: Array<[string, unknown]> = [];
     const disjuncoes: Clausula[][] = [];
     let patch: Record<string, unknown> | null = null;
     let nova: Record<string, unknown> | Record<string, unknown>[] | null = null;
     let colunas: string[] | null = null;
-    let ordem: string | null = null;
+    /**
+     * Os `.order()` encadeados, na ordem em que a rota os emitiu.
+     *
+     * ACUMULA, não sobrescreve: é o comportamento do PostgREST, e é o que o
+     * desempate `.order("position_in_stage").order("id")` da lista do funil
+     * (#3172) significa. Guardando só o último, o dublê mediria uma consulta
+     * que ordena apenas por `id` — e o teste do desempate mediria o dublê.
+     */
+    const ordens: Array<{ coluna: string; desc: boolean }> = [];
     let contar = false;
     let head = false;
     let apagar = false;
     let teto: number | null = null;
+    let desde = 0;
 
+    // `a->b->>c` é caminho jsonb do PostgREST: desce o objeto como o banco desceria.
+    const valorDaColuna = (r: Linha, c: string): unknown =>
+      c.split(/->>?/).reduce<unknown>((v, k) => (v && typeof v === "object" ? (v as Linha)[k] : undefined), r);
     const casam = () =>
       (tables[table] ?? [])
-        .filter((r) => filtros.every(([c, v]) => r[c] === v))
+        .filter((r) => filtros.every(([c, v]) => valorDaColuna(r, c) === v))
         .filter((r) => pertinencias.every(([c, vs]) => vs.includes(r[c])))
         // `neq` em SQL exclui NULL (`NULL <> v` nao e verdadeiro) — o duble
         // segue o banco, nao o JavaScript.
@@ -239,7 +319,31 @@ export function makeDb(opts: DbOpts = {}): Registro {
         // filtros — a mesma combinação do PostgREST.
         .filter((r) =>
           disjuncoes.every((clausulas) => clausulas.some((clausula) => casa(r, clausula))),
+        )
+        .filter((r) =>
+          intervalos.every(({ coluna, op, valor }) => {
+            const texto = typeof r[coluna] === "string" ? r[coluna] : String(r[coluna]);
+            return op === "gte" ? texto >= valor : texto <= valor;
+          }),
         );
+
+    /**
+     * Compara uma coluna de duas linhas como o Postgres compararia.
+     *
+     * Número com número compara como número (é a ordem do quadro, e a de
+     * `position`); o resto compara como texto — é assim que `id` (uuid/texto)
+     * ordena, e é o que o desempate `.order("id")` da lista do funil precisa
+     * para a página ser determinística. `null`/`undefined` viram string vazia,
+     * que é "primeiro" como o `NULLS FIRST` do PostgREST sem `ascending: false`.
+     */
+    const compararColuna = (a: Linha, b: Linha, coluna: string): number => {
+      const va = a[coluna];
+      const vb = b[coluna];
+      if (typeof va === "number" && typeof vb === "number") return va - vb;
+      const sa = va === null || va === undefined ? "" : String(va);
+      const sb = vb === null || vb === undefined ? "" : String(vb);
+      return sa < sb ? -1 : sa > sb ? 1 : 0;
+    };
 
     /**
      * Ordena, corta e projeta como o PostgREST faria.
@@ -250,8 +354,17 @@ export function makeDb(opts: DbOpts = {}): Registro {
      */
     const lidos = () => {
       let rows = [...casam()];
-      if (ordem) rows.sort((a, b) => Number(a[ordem!]) - Number(b[ordem!]));
-      if (teto !== null) rows = rows.slice(0, teto);
+      if (ordens.length > 0) {
+        rows.sort((a, b) => {
+          for (const { coluna, desc } of ordens) {
+            const d = compararColuna(a, b, coluna);
+            if (d !== 0) return desc ? -d : d;
+          }
+          return 0;
+        });
+      }
+      if (teto !== null) rows = rows.slice(desde, desde + teto);
+      if (opts.maxRows !== undefined) rows = rows.slice(0, opts.maxRows);
       // `select("*")` (usado por `app/api/v1/leads/_handler.ts`) é o CURINGA do
       // PostgREST — a linha inteira, não uma coluna literal chamada "*". Sem
       // este ramo, o projetor abaixo tratava "*" como nome de coluna e devolvia
@@ -321,6 +434,8 @@ export function makeDb(opts: DbOpts = {}): Registro {
       // é assim que o PostgREST responde, e a diferença não é acadêmica: o dublê
       // devolvendo `data: null` para `select(..., { count })` fez a emissão de
       // atividades do arquivamento sumir com a suíte verde.
+      const erroDeLeitura = opts.readError?.(table, filtros) ?? null;
+      if (erroDeLeitura) return { data: null, error: erroDeLeitura, count: null };
       if (head) return { data: null, error: null, count: casam().length };
       if (contar) return { data: lidos(), error: null, count: casam().length };
       return { data: lidos(), error: null, count: null };
@@ -385,8 +500,22 @@ export function makeDb(opts: DbOpts = {}): Registro {
         teto = n;
         return b;
       },
-      order: (col: string) => {
-        ordem = col;
+      gte: (c: string, v: string) => {
+        intervalos.push({ coluna: c, op: "gte", valor: v });
+        return b;
+      },
+      lte: (c: string, v: string) => {
+        intervalos.push({ coluna: c, op: "lte", valor: v });
+        return b;
+      },
+      /** `.range(de, ate)` — inclusivo nas duas pontas, como o PostgREST. */
+      range: (de: number, ate: number) => {
+        desde = de;
+        teto = ate - de + 1;
+        return b;
+      },
+      order: (col: string, o?: { ascending?: boolean }) => {
+        ordens.push({ coluna: col, desc: o?.ascending === false });
         return b;
       },
       maybeSingle: async () => {
@@ -414,7 +543,14 @@ export function makeDb(opts: DbOpts = {}): Registro {
     return { data: null, error: null };
   };
 
-  registro.client = { from: builder, rpc } as unknown as Registro["client"];
+  // A sessão do cookie (#2995): `getUser()` é a primeira coisa que a rota do
+  // quadro faz, e o dublê responde a sessão declarada — ou nenhuma.
+  const sessao = opts.user === undefined ? { id: USER_ID } : opts.user;
+  const auth = {
+    getUser: async () => ({ data: { user: sessao }, error: null }),
+  };
+
+  registro.client = { from: builder, rpc, auth } as unknown as Registro["client"];
   vi.mocked(createClient).mockResolvedValue(registro.client as never);
   return registro;
 }
