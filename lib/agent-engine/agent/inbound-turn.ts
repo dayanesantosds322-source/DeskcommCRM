@@ -136,6 +136,7 @@ import {
   isLeadInHandoff,
   performHumanHandoff,
 } from './human-handoff';
+import { algumaEntradaEspera, historicoParaEspera } from './resposta-automatica';
 import {
   maybeCompact,
   renderCompactedSummary,
@@ -1819,12 +1820,29 @@ export async function deteccoesDeterministicasDoAssistido(
     'motivo' | 'optedOutThisTurn' | 'lgpd'
   > => resto;
 
+  // Resposta automática (menu, expediente, emoji, frase repetida) não vira
+  // rascunho, passagem nem agenda. Não arma `force_human`: a próxima fala de
+  // uma pessoa ainda pode ser atendida.
+  const esperaAssistida = algumaEntradaEspera(
+    inboundsPendentes,
+    historicoParaEspera(historicoDoTurno),
+  );
+  if (esperaAssistida) {
+    log.info('entrada parece automática — sem rascunho, sem passagem e sem agenda', {
+      motivo: esperaAssistida.motivo,
+      ...(esperaAssistida.horarioAnunciado !== null
+        ? { horario_anunciado: esperaAssistida.horarioAnunciado }
+        : {}),
+      sugerir_retomada_unica: esperaAssistida.sugerirRetomadaUnica,
+    });
+    return true;
+  }
+
   // A GUARDA DO MENU DE ROBÔ (issue 3106): o casamento determinístico não passa
   // a conversa quando o que casou é fala de automação — menu numerado, mensagem
   // que se declara robô, ou a saudação que chega segundos depois do nosso disparo
-  // (ver `ehRespostaDeRobo`). Aqui o turno segue para o rascunho do assistido, que
-  // é o desenho do autor da issue: quem lê a mensagem é o modelo, e ele sabe
-  // reconhecer robô. A palavra-chave CONFIGURADA na tela não passa pela guarda: é
+  // (ver `ehRespostaDeRobo`). O que esta espera não cobriu segue para o rascunho
+  // do assistido. A palavra-chave CONFIGURADA na tela não passa pela guarda: é
   // escolha de quem opera o agente, e não a regra que esta issue corrige.
   if (
     inboundsPendentes.some(
@@ -2138,6 +2156,17 @@ async function escalarComercialAntesDoModelo(
          where o.organization_id = $1 and o.conversation_id = $2 and o.direction = 'outbound'), '-infinity')
      order by m.created_at desc limit 100`, [tenantId, turno.conversationId],
   )).rows.map((m) => m.body ?? '');
+  // Menu, expediente fechado, emoji ou frase repetida não são assunto comercial.
+  // Devolver false aqui não envia o aviso: as detecções do turno, mais abaixo,
+  // encerram sem resposta, sem passagem e sem agenda.
+  if (
+    algumaEntradaEspera(
+      textos,
+      historicoParaEspera(textos.map((body) => ({ direction: 'inbound', body }))),
+    )
+  ) {
+    return false;
+  }
   // STOP e pedido de humano VENCEM o desvio comercial. "Quanto custa? Para de me
   // mandar mensagem" caía aqui: o cliente recebia o aviso comercial e o turno
   // voltava sem registrar o opt-out. Com `false`, o turno segue para as
@@ -2877,6 +2906,22 @@ async function executarTurnoDoAgente(
   const mensagemDoJob =
     currentInboundText ?? latestInboundSignal(openingContext.context.messages);
   const inboundsPendentes = inboundsNaoRespondidos(openingContext.context.messages);
+  // Resposta automática não chega ao modelo. Sem envio, sem passagem e sem
+  // agenda. Vale também na prévia: o botão Testar mostra o mesmo silêncio.
+  const esperaAutomatica = algumaEntradaEspera(
+    inboundsPendentes,
+    historicoParaEspera(openingContext.context.messages),
+  );
+  if (esperaAutomatica) {
+    runLog.info('entrada parece automática — sem resposta, sem passagem e sem agenda', {
+      motivo: esperaAutomatica.motivo,
+      ...(esperaAutomatica.horarioAnunciado !== null
+        ? { horario_anunciado: esperaAutomatica.horarioAnunciado }
+        : {}),
+      sugerir_retomada_unica: esperaAutomatica.sugerirRetomadaUnica,
+    });
+    return;
+  }
   // A GUARDA DO MENU DE ROBÔ (issue 3106): o casamento determinístico segue
   // existindo, mas NÃO passa a conversa quando o que casou é fala de automação do
   // outro lado — menu de opções numeradas ("4 - Falar com um atendente"), mensagem
