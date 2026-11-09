@@ -128,6 +128,36 @@ export const prospectingInputSchema = z.discriminatedUnion("action", [
   // campanha AGORA, em vez de esperar o tick. Fechada a token: quem dispara
   // gasta rede e é uma pessoa revisando a fila.
   z.object({ action: z.literal("verificar_sites"), id: z.string().uuid() }).strict(),
+  // Lista já pronta. Não busca no provedor e não inicia envio. O cartão de
+  // "Iniciar abordagens" continua sendo a única ação que muda o status para running.
+  z
+    .object({
+      action: z.literal("seed_list"),
+      request_id: z.string().uuid(),
+      name: z.string().trim().min(2).max(120),
+      empresas: z
+        .array(
+          z
+            .object({
+              nome: z.string().trim().min(2).max(200),
+              telefone: z.string().trim().min(8).max(20),
+              fonte: z.string().trim().max(500).nullable().optional(),
+              segmento: z.string().trim().max(120).nullable().optional(),
+              endereco: z.string().trim().max(300).nullable().optional(),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(100),
+      daily_limit: LIMITE_DIARIO,
+      interval_minutes: INTERVALO_MINUTOS,
+      inicio: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      fim: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      fuso: z.string().trim().min(3).max(64).default("America/Manaus"),
+      instrucao: z.string().trim().min(10).max(4000),
+      agente_id: z.string().uuid().nullable().optional(),
+    })
+    .strict(),
 ]);
 export type CampaignConfig = z.infer<typeof campaignConfigSchema>;
 export type CampaignPace = Pick<CampaignConfig, "daily_limit" | "interval_minutes">;

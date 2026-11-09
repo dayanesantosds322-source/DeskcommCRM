@@ -18,6 +18,9 @@ import { gravarPrevia } from "@/lib/prospecting/previa";
 import { gerarPreviaDoCandidato } from "@/lib/prospecting/previa-gerar";
 import { enriquecerSitesPendentes } from "@/lib/prospecting/site-enrich";
 import { lerPersonalizacao } from "@/lib/prospecting/personalizar";
+import { ACOES_ABERTAS_AO_TOKEN } from "@/lib/prospecting/acoes-do-token";
+import { criarRascunhoDeLista } from "@/lib/prospecting/rascunho-de-lista";
+import { decisaoDaJanela } from "@/lib/prospecting/lista-pronta";
 import {
   activateCampaign,
   adjustPace,
@@ -33,7 +36,6 @@ import {
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 const headers = { "Cache-Control": "no-store" };
-const ACOES_ABERTAS_AO_TOKEN = new Set<string>(["configure", "search", "pause"]);
 /**
  * Espelho SQL de `pontuarCandidato` (oferta `site` + automação via
  * `c.config->'ofertas'->>0`). Ordenação com paginação; o TS exibe badge+motivo.
@@ -192,8 +194,26 @@ export async function POST(req: NextRequest) {
     if (body.action === "configure") {
       await configureCredential(pool, admin, org, body.api_key);
       result = { configured: true };
-    } else if (body.action === "search")
+    }     else if (body.action === "search")
       result = await createSearch(pool, admin, org, body.request_id, body.search);
+    else if (body.action === "seed_list") {
+      result = await criarRascunhoDeLista(pool, org, {
+        requestId: body.request_id,
+        nome: body.name,
+        empresas: body.empresas,
+        ritmo: { daily_limit: body.daily_limit, interval_minutes: body.interval_minutes },
+        janela: { inicio: body.inicio, fim: body.fim, fuso: body.fuso },
+        instrucao: body.instrucao,
+        agenteId: body.agente_id ?? null,
+      });
+      auditMetadata = {
+        operation: body.action,
+        quantidade: body.empresas.length,
+        daily_limit: body.daily_limit,
+        inicio: body.inicio,
+        fim: body.fim,
+      };
+    }
     else if (body.action === "start")
       result = await activateCampaign(pool, admin, org, body.id, body.config);
     else if (body.action === "pause") {
@@ -385,6 +405,10 @@ export async function POST(req: NextRequest) {
           )
         ).rows[0];
         if (!c?.config) throw new ProspectingError("Campanha pausada não encontrada.", 404);
+        const janela = decisaoDaJanela(c.search, new Date());
+        if (janela.tipo === "encerrada") {
+          throw new ProspectingError("A janela desta lista já terminou. Nada foi enviado.", 409);
+        }
         await validateConfig(db, org, c.config);
         if (
           (
@@ -395,10 +419,17 @@ export async function POST(req: NextRequest) {
           ).rows.length
         )
           throw new ProspectingError("Pause a outra campanha antes de retomar.", 409);
-        await db.query(
-          "update prospecting_campaigns set status='running',error=null,channel_down_since=null,next_send_at=greatest(next_send_at,now()+interval '1 minute'),updated_at=now() where organization_id=$1 and id=$2",
-          [org, body.id],
-        );
+        if (janela.tipo === "esperar") {
+          await db.query(
+            "update prospecting_campaigns set status='running',error=null,channel_down_since=null,next_send_at=$3,updated_at=now() where organization_id=$1 and id=$2",
+            [org, body.id, janela.enviarEm],
+          );
+        } else {
+          await db.query(
+            "update prospecting_campaigns set status='running',error=null,channel_down_since=null,next_send_at=greatest(next_send_at,now()+interval '1 minute'),updated_at=now() where organization_id=$1 and id=$2",
+            [org, body.id],
+          );
+        }
         return { resumed: true };
       });
     }

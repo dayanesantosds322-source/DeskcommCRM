@@ -24,6 +24,7 @@ import {
 import { CanalReconectandoError, ProspectingError } from "./provider";
 import { audit } from "@/lib/audit";
 import { vereditoPuro } from "./site-classify";
+import { decisaoDaJanela } from "./lista-pronta";
 import { pedidoDaProspeccao } from "./pedido-da-prospeccao";
 import {
   provedorDaOrganizacao,
@@ -705,11 +706,22 @@ export async function activateCampaign(
         [org, id],
       )
     ).rows;
+    const janela = decisaoDaJanela(c.search, new Date());
+    if (janela.tipo === "encerrada") {
+      throw new ProspectingError("A janela desta lista já terminou. Nada foi enviado.", 409);
+    }
     await enfileirarCandidatos(db, admin, org, c, config, candidates);
-    await db.query(
-      "update prospecting_campaigns set config=$3,status='running',next_send_at=now()+interval '1 minute',error=null,channel_down_since=null,updated_at=now() where organization_id=$1 and id=$2",
-      [org, id, config],
-    );
+    if (janela.tipo === "esperar") {
+      await db.query(
+        "update prospecting_campaigns set config=$3,status='running',next_send_at=$4,error=null,channel_down_since=null,updated_at=now() where organization_id=$1 and id=$2",
+        [org, id, config, janela.enviarEm],
+      );
+    } else {
+      await db.query(
+        "update prospecting_campaigns set config=$3,status='running',next_send_at=now()+interval '1 minute',error=null,channel_down_since=null,updated_at=now() where organization_id=$1 and id=$2",
+        [org, id, config],
+      );
+    }
     return { started: true };
   });
 }

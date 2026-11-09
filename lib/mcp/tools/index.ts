@@ -56,6 +56,7 @@ import { crmDescribeExternalData, crmQueryExternalData } from "./dados-externos"
 import { crmConsultarReceita } from "./receitas-externas";
 import { crmListPrivacyRequests } from "./privacidade";
 import { crmGetProspectingSiteAudit } from "./prospeccao-site";
+import { crmCreateProspectingListDraft } from "./prospeccao-rascunho";
 import {
   crmArchiveStage,
   crmCreateStage,
@@ -155,6 +156,7 @@ export const allTools: ReadonlyArray<McpToolDefinition> = [
   crmCancelAppointment,
   crmConfirmAppointment,
   crmSetAppointmentOutcome,
+  crmCreateProspectingListDraft,
   crmCreateLead,
   crmUpdateLead,
   crmMoveLeadStage,

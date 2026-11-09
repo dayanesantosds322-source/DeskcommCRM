@@ -38,6 +38,7 @@ import { prepararCandidatos } from "./preparo";
 import { CanalReconectandoError, ProspectingError } from "./provider";
 // O carimbo do pedido da prospecção: `prospecting:` — nunca `rule:` (#3072).
 import { pedidoDaProspeccao } from "./pedido-da-prospeccao";
+import { decisaoDaJanela } from "./lista-pronta";
 import { OrgNaoOperanteError } from "@/lib/organizacao/operante";
 import {
   withProspectingLock,
@@ -121,6 +122,21 @@ export async function sendNextCandidate(
       [c.organization_id, c.id],
     );
   if (new Date(c.next_send_at).getTime() > Date.now()) return;
+  const janela = decisaoDaJanela(c.search, new Date());
+  if (janela.tipo === "esperar") {
+    await db.query(
+      "update prospecting_campaigns set next_send_at=$3 where organization_id=$1 and id=$2",
+      [c.organization_id, c.id, janela.enviarEm],
+    );
+    return;
+  }
+  if (janela.tipo === "encerrada") {
+    await db.query(
+      "update prospecting_campaigns set status='paused',error=$3,updated_at=now() where organization_id=$1 and id=$2 and status='running'",
+      [c.organization_id, c.id, "A janela desta lista terminou. Nenhum envio novo."],
+    );
+    return;
+  }
   const { knobs, numberActivatedAt } = await loadChannelKnobs(
     db,
     c.organization_id,
